@@ -21,11 +21,13 @@ jobs:
           java-version: 8
           distribution: 'temurin'
 
-      - name: Install Gradle
-        uses: gradle/gradle-build-action@v2
+      - name: Set up Gradle 4.10.3
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 4.10.3
 
-      - name: Generate Gradle Wrapper
-        run: gradle wrapper
+      - name: Generate Gradle Wrapper (compatible version)
+        run: gradle wrapper --gradle-version 4.10.3
 
       - name: Grant execute permission to Gradle Wrapper
         run: chmod +x ./gradlew
@@ -47,5 +49,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ShadowMods-Build
-          path: |
-            build/libs/*.jar
+          path: build/libs/*.jar
