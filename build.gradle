@@ -1,0 +1,132 @@
+buildscript {
+    repositories {
+        jcenter()
+        maven {
+            name = "forge"
+            url = "https://files.minecraftforge.net/maven"
+        }
+    }
+    dependencies {
+        classpath 'net.minecraftforge.gradle:ForgeGradle:2.1-SNAPSHOT'
+    }
+}
+
+apply plugin: 'net.minecraftforge.gradle.forge'
+apply plugin: 'java'
+
+// Define configurations explicitly
+configurations {
+    compile
+    implementation.extendsFrom(compile)
+}
+
+version = "1.0.0"
+group = "com.shadow.ShadowAddons"
+archivesBaseName = "ShadowMods"
+
+sourceCompatibility = targetCompatibility = 1.8
+
+minecraft {
+    version = "1.8.9-11.15.1.2318-1.8.9"
+    runDir = "run"
+    mappings = "stable_22"
+    makeObfSourceJar = false
+
+    // Optional JVM args for the client
+    clientJvmArgs = [
+            "-Xmx2G",
+            "-XX:+UseConcMarkSweepGC",
+            "-XX:+CMSIncrementalMode",
+            "-XX:-UseAdaptiveSizePolicy",
+            "-Dfml.ignoreInvalidMinecraftCertificates=true"
+    ]
+}
+
+idea {
+    module {
+        inheritOutputDirs = true
+    }
+}
+
+eclipse {
+    classpath {
+        downloadSources = true
+    }
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "mcversion", project.minecraft.version
+
+    from(sourceSets.main.resources.srcDirs) {
+        include 'mcmod.info'
+        expand 'version': project.version, 'mcversion': project.minecraft.version
+    }
+
+    from(sourceSets.main.resources.srcDirs) {
+        exclude 'mcmod.info'
+    }
+}
+
+// Add dependencies
+dependencies {
+    compile 'io.github.classgraph:classgraph:4.8.165'
+}
+
+// Regular JAR with embedded dependencies and metadata
+jar {
+    manifest {
+        attributes(
+                'Manifest-Version': 1.0,
+                'FMLCorePlugin': "",
+                'FMLCorePluginContainsFMLMod': true,
+                'ForceLoadAsMod': true,
+                'TweakClass': 'net.minecraftforge.fml.common.launcher.FMLTweaker',
+                'TweakOrder': 0
+        )
+    }
+
+    from sourceSets.main.output
+
+    // Include dependencies inside the JAR
+    from {
+        configurations.compile.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+
+    classifier = ''
+}
+
+// Shadow JAR (fat JAR) task
+task shadowJar(type: Jar) {
+    manifest {
+        attributes(
+                'Manifest-Version': 1.0,
+                'Main-Class': 'com.shadow.ShadowAddons.ShadowAddons'
+        )
+    }
+
+    classifier = 'all'
+
+    from sourceSets.main.output
+
+    from {
+        configurations.compile.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+}
+
+// Build both JARs when building
+task buildAll {
+    dependsOn jar
+    dependsOn shadowJar
+}
+
+// Run `build` also runs `buildAll`
+build.dependsOn buildAll
