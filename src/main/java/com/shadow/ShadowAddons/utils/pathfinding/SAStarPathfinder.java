@@ -3,11 +3,9 @@ package com.shadow.ShadowAddons.utils.pathfinding;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockLadder;
 import net.minecraft.block.BlockStairs;
-import net.minecraft.block.material.Material;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.init.Blocks;
 import net.minecraft.util.BlockPos;
 import net.minecraft.world.World;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
@@ -18,27 +16,49 @@ import org.lwjgl.opengl.GL11;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static com.shadow.ShadowAddons.utils.pathfinding.SAStarPathfinder.PathNode.*;
+
 public class SAStarPathfinder {
+
+    //create updateMovementCapabilities method to have speedMultiplier and Jump boost level take them as arguments
+    public static void updateMovementCapabilities(double speedMultiplier, double jumpBoostMultiplier) {
+        Config.SPEED_MULTIPLIER = speedMultiplier;
+        Config.JUMP_BOOST_MULTIPLIER = jumpBoostMultiplier;
+        Config.MAX_JUMP_HEIGHT = (int) Math.ceil(1 * jumpBoostMultiplier); // Adjust max jump height based on multiplier
+    }
 
     // Configuration
     public static class Config {
-        // Bump these up so very long paths can be found:
-        public static int MAX_SEARCH_RADIUS = 300;   // allow up to ~300‐block radius
-        public static int MAX_SEARCH_DEPTH  = 200;   // allow deeper expansion
-        public static int MAX_JUMP_HEIGHT   = 3;
-        public static int MAX_FALL_DISTANCE = 20;    // can fall up to 20 blocks safely
-        public static boolean AVOID_LAVA    = true;
-        public static boolean ALLOW_SWIMMING  = true;
-        public static boolean ALLOW_CLIMBING  = true;
-        public static HeuristicType HEURISTIC_TYPE = HeuristicType.MANHATTAN;
-
-        // Debug settings (keep as you like)
-        public static boolean DEBUG_ENABLED    = true;
-        public static boolean SHOW_PATH        = true;
-        public static boolean SHOW_NODES       = true;
-        public static boolean SHOW_COSTS       = false;
+        public static int MAX_SEARCH_RADIUS = 150;
+        public static int MAX_SEARCH_DEPTH = 1000;
+        public static double VERTICAL_PENALTY = 1.5;  // Slightly prefer level paths
+        public static int MAX_Y_DIFFERENCE = 50;  // Maximum Y difference to consider
+        public static boolean AVOID_FENCES = true;
+        public static boolean SMART_STAIR_CLIMBING = true;
+        public static boolean ALLOW_CLIMBING = true;
+        public static boolean ALLOW_SWIMMING = true;
+        public static boolean ALLOW_UNSAFE_DROPS = true;  // Allow drops that might damage
+        public static double OBSTACLE_PENALTY = 10.0;
+        public static double FENCE_PENALTY = 20.0;
+        public static double MAX_DROP_HEIGHT = 100;
+        public static boolean DEBUG_ENABLED = false;
+        public static boolean SHOW_PATH = true;
+        public static boolean SHOW_NODES = false;
+        public static boolean SHOW_COSTS = false;
         public static boolean SHOW_SEARCH_AREA = false;
-        public static boolean SHOW_METRICS     = true;
+        public static boolean SHOW_METRICS = true;
+        public static HeuristicType HEURISTIC_TYPE = HeuristicType.EUCLIDEAN;
+        public static boolean PREFER_STRAIGHT_PATHS = true;  // New config option
+        public static double STRAIGHT_PATH_BONUS = 0.8;     // Cost multiplier for straight paths
+        public static double DROP_COST_MULTIPLIER = 0.7; // Make drops more attractive than going around
+
+        // New settings for enhanced movement and obstacle avoidance
+        public static double SPEED_MULTIPLIER = 1.0; // Will be adjusted based on effects
+        public static double JUMP_BOOST_MULTIPLIER = 1.0; // Will be adjusted based on effects
+        public static int MAX_JUMP_HEIGHT = 1; // Base jump height
+        public static int LOOK_AHEAD_DISTANCE = 5; // How far to look ahead for obstacles
+        public static boolean ENABLE_ETHERWARP = false; // Support for etherwarp when available
+        public static int CHUNK_SIZE = 50; // For handling very long distances
     }
 
     public enum HeuristicType {
@@ -62,6 +82,201 @@ public class SAStarPathfinder {
             this.fCost = gCost + hCost;
             this.movementType = movementType;
         }
+
+
+
+
+
+        // make the isValidPosition method static so it can be used without an instance
+        public static boolean isValidPosition(BlockPos pos) {
+            if (pos.getY() < 0 || pos.getY() >= 256) return false; // Y bounds check
+
+            World world = Minecraft.getMinecraft().theWorld;
+            if (world == null) return false;
+
+            // Check for valid floor/support
+            Block blockBelow = world.getBlockState(pos.down()).getBlock();
+            Block blockAt = world.getBlockState(pos).getBlock();
+            Block blockAbove = world.getBlockState(pos.up()).getBlock();
+
+            // First check if the position itself is a valid block to be on
+            boolean validGround = blockBelow.isNormalCube() ||
+                                blockBelow instanceof net.minecraft.block.BlockStairs ||
+                                blockBelow instanceof net.minecraft.block.BlockSlab ||
+                                blockBelow instanceof net.minecraft.block.BlockFence ||
+                                blockBelow instanceof net.minecraft.block.BlockWall ||
+                                blockAt instanceof net.minecraft.block.BlockLadder ||
+                                blockAt instanceof net.minecraft.block.BlockVine ||
+                                (Config.ALLOW_SWIMMING && blockAt.getMaterial().isLiquid());
+
+            // Also check the block itself and one above for passability
+            boolean hasHeadroom = (blockAt.isPassable(world, pos) ||
+                                 blockAt.getMaterial().isLiquid() ||
+                                 blockAt instanceof net.minecraft.block.BlockLadder ||
+                                 blockAt instanceof net.minecraft.block.BlockVine) &&
+                                (blockAbove.isPassable(world, pos.up()) ||
+                                 blockAbove.getMaterial().isLiquid());
+
+            // Special case: if we're checking goal position, be more lenient
+            boolean isOnOrNearGround = validGround;
+            if (!isOnOrNearGround) {
+                // Check blocks around for valid ground in case we're near an edge
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dz == 0) continue;
+                        BlockPos checkPos = pos.add(dx, -1, dz);
+                        Block checkBlock = world.getBlockState(checkPos).getBlock();
+                        if (checkBlock.isNormalCube() ||
+                            checkBlock instanceof net.minecraft.block.BlockStairs ||
+                            checkBlock instanceof net.minecraft.block.BlockSlab) {
+                            isOnOrNearGround = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Debug output for invalid positions
+            if (Config.DEBUG_ENABLED && (!isOnOrNearGround || !hasHeadroom)) {
+                System.out.println("Invalid position at " + pos +
+                    ": ground=" + isOnOrNearGround +
+                    ", headroom=" + hasHeadroom +
+                    ", block=" + blockAt.getLocalizedName() +
+                    ", below=" + blockBelow.getLocalizedName() +
+                    ", above=" + blockAbove.getLocalizedName());
+            }
+
+            return isOnOrNearGround && hasHeadroom;
+        }
+        public static boolean isPassable(BlockPos pos) {
+            World world = Minecraft.getMinecraft().theWorld;
+            if (world == null) return false;
+            Block block = world.getBlockState(pos).getBlock();
+            return block.isPassable(world, pos);
+        }
+
+        public static boolean isAirOrPassable(BlockPos pos) {
+            Block block = Minecraft.getMinecraft().theWorld.getBlockState(pos).getBlock();
+            return block.isAir(Minecraft.getMinecraft().theWorld, pos);
+        }
+        public static boolean isClimbable(BlockPos pos) {
+            Block block = Minecraft.getMinecraft().theWorld.getBlockState(pos).getBlock();
+            return block instanceof BlockLadder || block instanceof BlockStairs;
+        }
+        public static boolean isNearWall(BlockPos pos) {
+            World world = Minecraft.getMinecraft().theWorld;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dz == 0) continue; // Skip self
+                    BlockPos neighbor = pos.add(dx, 0, dz);
+                    Block block = world.getBlockState(neighbor).getBlock();
+                    if (block.isNormalCube()) return true;
+                }
+            }
+            return false;
+        }
+
+        public static boolean isNearObstacle(BlockPos pos) {
+            World world = Minecraft.getMinecraft().theWorld;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dz == 0) continue; // Skip self
+                    BlockPos neighbor = pos.add(dx, 0, dz);
+                    Block block = world.getBlockState(neighbor).getBlock();
+                    if (!block.isAir(world, neighbor) && !block.isPassable(world, pos)) return true;
+                }
+            }
+            return false;
+        }
+
+
+        // create calculateHeuristic method to calculate heuristic cost based on the heuristic type
+        public static double calculateHeuristic(BlockPos start, BlockPos goal) {
+            switch (Config.HEURISTIC_TYPE) {
+                case MANHATTAN:
+                    return Math.abs(start.getX() - goal.getX()) + Math.abs(start.getZ() - goal.getZ());
+                case EUCLIDEAN:
+                    return Math.sqrt(start.distanceSq(goal));
+                case DIAGONAL:
+                    int dx = Math.abs(start.getX() - goal.getX());
+                    int dz = Math.abs(start.getZ() - goal.getZ());
+                    return Math.max(dx, dz) + (Math.sqrt(2) - 1) * Math.min(dx, dz);
+                default:
+                    throw new IllegalArgumentException("Unknown heuristic type: " + Config.HEURISTIC_TYPE);
+            }
+        }
+        // create hasObstaclesBetween method to check if there are obstacles between two positions
+        public static boolean hasObstaclesBetween(BlockPos from, BlockPos to) {
+            World world = Minecraft.getMinecraft().theWorld;
+            int dx = to.getX() - from.getX();
+            int dz = to.getZ() - from.getZ();
+            int steps = Math.max(Math.abs(dx), Math.abs(dz));
+            double stepX = dx / (double) steps;
+            double stepZ = dz / (double) steps;
+
+            for (int i = 0; i <= steps; i++) {
+                BlockPos checkPos = from.add((int) (stepX * i), 0, (int) (stepZ * i));
+                Block block = world.getBlockState(checkPos).getBlock();
+                if (!block.isAir(world, checkPos) && !block.isPassable(world, checkPos)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        // create tryNeighbor method to attempt adding a neighbor node
+        private void tryNeighbor(List<PathNode> neighbors, PathNode current, BlockPos neighborPos, BlockPos goal) {
+            if (!isValidPosition(neighborPos)) return;
+
+            // Check if we can move to this position
+            if (!hasHeadroom(neighborPos)) return;
+
+            // Calculate movement type
+            MovementType movementType = getMovementType(current.pos, neighborPos);
+            if (movementType == null) return; // Invalid movement
+
+            // Calculate costs
+            double gCost = current.gCost + movementType.cost * Math.sqrt(current.pos.distanceSq(neighborPos));
+            double hCost = calculateHeuristic(neighborPos, goal);
+            PathNode neighborNode = new PathNode(neighborPos, current, gCost, hCost, movementType);
+
+            neighbors.add(neighborNode);
+        }
+
+
+        public static boolean hasHeadroom(BlockPos pos) {
+            World world = Minecraft.getMinecraft().theWorld;
+            for (int y = 0; y < 2; y++) {
+                BlockPos checkPos = pos.up(y);
+                Block block = world.getBlockState(checkPos).getBlock();
+                if (!block.isAir(world, checkPos) && !block.isPassable(world, checkPos)) return false;
+            }
+            return true;
+}
+
+        public static boolean hasObstacle(BlockPos from, BlockPos to, int maxHeight) {
+            World world = Minecraft.getMinecraft().theWorld;
+            int dx = to.getX() - from.getX();
+            int dz = to.getZ() - from.getZ();
+            int steps = Math.max(Math.abs(dx), Math.abs(dz));
+            double stepX = dx / (double) steps;
+            double stepZ = dz / (double) steps;
+
+            for (int i = 0; i <= steps; i++) {
+                BlockPos checkPos = from.add((int) (stepX * i), 0, (int) (stepZ * i));
+                for (int y = 0; y < maxHeight; y++) {
+                    Block block = world.getBlockState(checkPos.up(y)).getBlock();
+                    if (!block.isAir(world, checkPos.up(y)) && !block.isPassable(world, checkPos)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        public static boolean isDiagonalMove(BlockPos from, BlockPos to) {
+            return Math.abs(from.getX() - to.getX()) == 1 && Math.abs(from.getZ() - to.getZ()) == 1;
+        }
+
 
         @Override
         public int compareTo(PathNode other) {
@@ -220,235 +435,213 @@ public class SAStarPathfinder {
         List<PathNode> neighbors = new ArrayList<>();
         BlockPos pos = current.pos;
 
-        // 8-directional movement
-        int[] dx = {-1, -1, -1, 0, 0, 1, 1, 1};
-        int[] dz = {-1,  0,  1, -1,1, -1, 0,  1};
-
-        for (int i = 0; i < 8; i++) {
-            BlockPos newPos = pos.add(dx[i], 0, dz[i]);
-
-            // Walk on same level or 1-block step
-            tryMovement(neighbors, current, newPos, goal, MovementType.WALK);
-            // Jump up
-            tryMovement(neighbors, current, newPos.up(), goal, MovementType.JUMP);
-            // Fall down
-            tryMovement(neighbors, current, newPos.down(), goal, MovementType.FALL);
-
-            // Climbing
-            if (Config.ALLOW_CLIMBING) {
-                tryClimbing(neighbors, current, newPos, goal);
+        // Try cardinal directions first with potential straight path bonus
+        int[][] cardinalDirs = {{0,1}, {1,0}, {0,-1}, {-1,0}};
+        for (int[] dir : cardinalDirs) {
+            BlockPos nextPos = pos.add(dir[0], 0, dir[1]);
+            if (current.parent != null) {
+                // Check if this continues in the same direction as current movement
+                int prevDx = pos.getX() - current.parent.pos.getX();
+                int prevDz = pos.getZ() - current.parent.pos.getZ();
+                if (prevDx == dir[0] && prevDz == dir[1] && Config.PREFER_STRAIGHT_PATHS) {
+                    // This is a straight continuation - apply bonus
+                    PathNode straightNode = new PathNode(
+                        nextPos,
+                        current,
+                        current.gCost + MovementType.WALK.cost * Config.STRAIGHT_PATH_BONUS,
+                        calculateHeuristic(nextPos, goal),
+                        MovementType.WALK
+                    );
+                    if (isValidPosition(nextPos) && hasHeadroom(nextPos)) {
+                        neighbors.add(straightNode);
+                        continue;
+                    }
+                }
             }
+            current.tryNeighbor(neighbors, current, nextPos, goal);
+        }
 
-            // Swimming
-            if (Config.ALLOW_SWIMMING) {
-                trySwimming(neighbors, current, newPos, goal);
+        // Only try diagonals if we don't have good cardinal options
+        if (neighbors.isEmpty() || neighbors.size() < 2) {
+            int[][] diagonalDirs = {{1,1}, {1,-1}, {-1,1}, {-1,-1}};
+            for (int[] dir : diagonalDirs) {
+                BlockPos diagPos = pos.add(dir[0], 0, dir[1]);
+                if (canMoveDiagonally(pos, diagPos)) {
+                    current.tryNeighbor(neighbors, current, diagPos, goal);
+                }
             }
+        }
+
+        // Add vertical movement options
+        if (current.movementType != MovementType.JUMP) {
+            current.tryNeighbor(neighbors, current, pos.up(), goal);
+        }
+        if (current.movementType != MovementType.FALL) {
+            current.tryNeighbor(neighbors, current, pos.down(), goal);
         }
 
         return neighbors;
     }
 
-    private void tryMovement(List<PathNode> neighbors, PathNode current, BlockPos pos, BlockPos goal, MovementType movementType) {
-        if (!isValidMovement(current.pos, pos, movementType)) return;
-
-        double movementCost = getMovementCost(current.pos, pos, movementType);
-        double gCost = current.gCost + movementCost;
-        double hCost = calculateHeuristic(pos, goal);
-
-        neighbors.add(new PathNode(pos, current, gCost, hCost, movementType));
-    }
-
-    private void tryClimbing(List<PathNode> neighbors, PathNode current, BlockPos pos, BlockPos goal) {
-        for (int y = 1; y <= Config.MAX_JUMP_HEIGHT; y++) {
-            BlockPos climbPos = pos.up(y);
-            if (isClimbable(pos.up(y - 1)) && isValidPosition(climbPos)) {
-                double movementCost = getMovementCost(current.pos, climbPos, MovementType.CLIMB);
-                double gCost = current.gCost + movementCost;
-                double hCost = calculateHeuristic(climbPos, goal);
-                neighbors.add(new PathNode(climbPos, current, gCost, hCost, MovementType.CLIMB));
+    private boolean hasWallInDirection(BlockPos pos, int dx, int dz) {
+        int wallHeight = 0;
+        for (int y = 0; y < 3; y++) {
+            BlockPos check = pos.add(dx, y, dz);
+            if (world.getBlockState(check).getBlock().isNormalCube()) {
+                wallHeight++;
             }
         }
+        return wallHeight >= 2;
     }
 
-    private void trySwimming(List<PathNode> neighbors, PathNode current, BlockPos pos, BlockPos goal) {
-        if (isWater(pos) && isValidPosition(pos)) {
-            double movementCost = getMovementCost(current.pos, pos, MovementType.SWIM);
-            double gCost = current.gCost + movementCost;
-            double hCost = calculateHeuristic(pos, goal);
-            neighbors.add(new PathNode(pos, current, gCost, hCost, MovementType.SWIM));
-        }
-    }
+    //create handleObstacleAvoidance to handle             handleObstacleAvoidance(player, target);
+    public static boolean handleObstacleAvoidance(EntityPlayer player, BlockPos target) {
+        BlockPos playerPos = player.getPosition();
+        if (playerPos.equals(target)) return true; // Already at target
 
-    // Movement validation
-    private boolean isValidMovement(BlockPos from, BlockPos to, MovementType movementType) {
-        if (!isValidPosition(to)) return false;
-        int deltaY = to.getY() - from.getY();
-
-        switch (movementType) {
-            case WALK:
-                return canWalkTo(from, to);
-            case JUMP:
-                return deltaY > 0 && deltaY <= Config.MAX_JUMP_HEIGHT && canJumpTo(from, to);
-            case FALL:
-                return deltaY < 0 && canFallTo(from, to);
-            case CLIMB:
-                return deltaY > 0 && canClimbTo(from, to);
-            case SWIM:
-                return canSwimTo(from, to);
-            default:
-                return false;
-        }
-    }
-
-    private boolean canWalkTo(BlockPos from, BlockPos to) {
-        int deltaY = to.getY() - from.getY();
-
-        // Flat walk
-        if (deltaY == 0) {
-            return isWalkable(to) && !hasObstacle(from, to, 2);
-        }
-
-        // Step up one block as “stairs”
-        if (deltaY == 1) {
-            if (!isValidPosition(to)) return false;          // block must be empty
-            if (!isSolid(getBlock(to.down()))) return false; // solid underfoot
-            if (isSolid(getBlock(to))) return false;         // space must be empty
-            if (isSolid(getBlock(to.up()))) return false;    // headspace must be empty
-            return !hasObstacle(from, to, 2);
-        }
-
-        return false;
-    }
-
-    private boolean canJumpTo(BlockPos from, BlockPos to) {
-        int deltaY = to.getY() - from.getY();
-        return deltaY <= Config.MAX_JUMP_HEIGHT && isWalkable(to) && !hasObstacle(from, to, deltaY + 2);
-    }
-
-    private boolean canFallTo(BlockPos from, BlockPos to) {
-        int deltaY = to.getY() - from.getY();
-        if (deltaY >= 0) return false; // only downward
-
-        if (Math.abs(deltaY) > Config.MAX_FALL_DISTANCE) return false;
-        if (!isWalkable(to)) return false; // must land on walkable spot
-
-        // Ensure all blocks between from.y-1 down to to.y are non-solid
-        BlockPos check = from.down();
-        while (check.getY() >= to.getY()) {
-            if (isSolid(getBlock(check))) {
-                return false;
+        // Check if we can move directly to the target
+        if (PathNode.hasObstaclesBetween(playerPos, target)) {
+            // If there are obstacles, try to find a gap
+            List<BlockPos> gaps = findWallGap(playerPos, target);
+            if (!gaps.isEmpty()) {
+                // If we found a gap, move to the closest one
+                BlockPos closestGap = gaps.get(0);
+                player.setPositionAndUpdate(closestGap.getX(), closestGap.getY(), closestGap.getZ());
+                return true;
             }
-            check = check.down();
+            // If no gaps found, return false
+            return false;
         }
+        // No obstacles, we can move directly
+        player.setPositionAndUpdate(target.getX(), target.getY(), target.getZ());
         return true;
     }
 
-    private boolean canClimbTo(BlockPos from, BlockPos to) {
-        return isClimbable(to) || (isWalkable(to) && isClimbable(from.up()));
-    }
 
-    private boolean canSwimTo(BlockPos from, BlockPos to) {
-        return isWater(to) && !hasObstacle(from, to, 2);
-    }
+    private static List<BlockPos> findWallGap(BlockPos start, BlockPos end) {
+        List<BlockPos> potentialPoints = new ArrayList<>();
+        double dx = end.getX() - start.getX();
+        double dz = end.getZ() - start.getZ();
+        double length = Math.sqrt(dx * dx + dz * dz);
+        // Normalize direction vector
+        double dirX = dx / length;
+        double dirZ = dz / length;
 
-    // Block type checking
-    private boolean isValidPosition(BlockPos pos) {
-        if (pos.getY() < 0 || pos.getY() > 256) return false;
-        return !isDangerous(pos) && (isWalkable(pos) || isWater(pos) || isClimbable(pos));
-    }
+        World world = Minecraft.getMinecraft().theWorld;
+        if (world == null) return potentialPoints;
 
-    private boolean isWalkable(BlockPos pos) {
-        Block below = getBlock(pos.down());
-        Block at    = getBlock(pos);
-        Block above = getBlock(pos.up());
-        return isSolid(below) && !isSolid(at) && !isSolid(above) && !isLava(pos);
-    }
+        // Search in a wider area for gaps
+        for (int dist = 1; dist <= 5; dist++) {
+            for (int offset = -3; offset <= 3; offset++) {
+                // Check perpendicular to the direction
+                double perpX = -dirZ * offset;
+                double perpZ = dirX * offset;
 
-    private boolean isWater(BlockPos pos) {
-        return getBlock(pos).getMaterial() == Material.water;
-    }
+                BlockPos check = new BlockPos(
+                        start.getX() + dirX * dist + perpX,
+                        start.getY(),
+                        start.getZ() + dirZ * dist + perpZ
+                );
 
-    private boolean isLava(BlockPos pos) {
-        return getBlock(pos).getMaterial() == Material.lava;
-    }
-
-    private boolean isClimbable(BlockPos pos) {
-        Block block = getBlock(pos);
-        return block instanceof BlockLadder || block == Blocks.vine || block == Blocks.waterlily;
-    }
-
-    private boolean isSolid(Block block) {
-        return block != null && block.isFullBlock() && block.getMaterial().isSolid();
-    }
-
-    private boolean isDangerous(BlockPos pos) {
-        if (Config.AVOID_LAVA && isLava(pos)) return true;
-        Block block = getBlock(pos);
-        return block == Blocks.fire || block == Blocks.cactus || block.getMaterial() == Material.lava;
-    }
-
-    private boolean hasObstacle(BlockPos from, BlockPos to, int height) {
-        int dx = Integer.signum(to.getX() - from.getX());
-        int dz = Integer.signum(to.getZ() - from.getZ());
-        BlockPos current = from;
-
-        while (!current.equals(to)) {
-            for (int y = 0; y < height; y++) {
-                if (isSolid(getBlock(current.up(y)))) {
-                    return true;
+                // Look for 2-block high gaps
+                if (isValidGapPoint(check)) {
+                    potentialPoints.add(check);
                 }
-            }
-            current = current.add(dx, 0, dz);
-        }
-        return false;
-    }
 
-    // Cost calculation
-    private double getMovementCost(BlockPos from, BlockPos to, MovementType movementType) {
-        double baseCost = movementType.cost;
-        double distance = from.distanceSq(to);
-
-        double terrainModifier = 1.0;
-        if (isWater(to)) terrainModifier *= 1.5;
-        if (getBlock(to.down()) instanceof BlockStairs) terrainModifier *= 0.9;
-        if (isDiagonal(from, to)) terrainModifier *= MovementType.DIAGONAL.cost;
-        if (nearDanger(to)) terrainModifier *= 2.0;
-
-        return baseCost * Math.sqrt(distance) * terrainModifier;
-    }
-
-    private boolean isDiagonal(BlockPos from, BlockPos to) {
-        return Math.abs(from.getX() - to.getX()) > 0 && Math.abs(from.getZ() - to.getZ()) > 0;
-    }
-
-    private boolean nearDanger(BlockPos pos) {
-        for (int x = -1; x <= 1; x++) {
-            for (int z = -1; z <= 1; z++) {
-                if (isDangerous(pos.add(x, 0, z)) || isDangerous(pos.add(x, -1, z))) {
-                    return true;
+                // Also check different Y levels
+                for (int y = -1; y <= 2; y++) {
+                    BlockPos elevated = check.add(0, y, 0);
+                    if (isValidGapPoint(elevated)) {
+                        potentialPoints.add(elevated);
+                    }
                 }
             }
         }
-        return false;
+
+        // Sort points by distance to target
+        potentialPoints.sort((a, b) -> Double.compare(
+                a.distanceSq(end),
+                b.distanceSq(end)
+        ));
+
+        return potentialPoints;
     }
 
-    // Heuristic calculation
-    private double calculateHeuristic(BlockPos from, BlockPos to) {
-        switch (Config.HEURISTIC_TYPE) {
-            case MANHATTAN:
-                return Math.abs(from.getX() - to.getX())
-                        + Math.abs(from.getY() - to.getY())
-                        + Math.abs(from.getZ() - to.getZ());
-            case EUCLIDEAN:
-                return Math.sqrt(from.distanceSq(to));
-            case DIAGONAL:
-                int dx = Math.abs(from.getX() - to.getX());
-                int dy = Math.abs(from.getY() - to.getY());
-                int dz = Math.abs(from.getZ() - to.getZ());
-                return Math.max(dx, dz) + Math.abs(dy - Math.max(dx, dz)) * 0.414;
-            default:
-                return from.distanceSq(to);
+    private static boolean isValidGapPoint(BlockPos pos) {
+        World world = Minecraft.getMinecraft().theWorld;
+        if (world == null) return false;
+
+        // Must have space to stand and move
+        if (!isAirOrPassable(pos) || !isAirOrPassable(pos.up())) {
+            return false;
         }
+
+        // Must have solid ground or climbable
+        Block below = world.getBlockState(pos.down()).getBlock();
+        if (!below.isNormalCube() && !isClimbable(pos)) {
+            return false;
+        }
+
+        // Check for clearance on at least one side
+        boolean hasPath = false;
+        for (int[] dir : new int[][]{{1,0}, {-1,0}, {0,1}, {0,-1}}) {
+            BlockPos side = pos.add(dir[0], 0, dir[1]);
+            if (isAirOrPassable(side) && isAirOrPassable(side.up())) {
+                hasPath = true;
+                break;
+            }
+        }
+
+        return hasPath;
+    }
+
+    private static MovementType getMovementType(BlockPos from, BlockPos to) {
+        int dy = to.getY() - from.getY();
+
+        // First check for vertical movement
+        if (dy > 0) {
+            if (dy > Config.MAX_JUMP_HEIGHT) {
+                // Check if we can climb
+                if (isClimbable(to) || isClimbable(from)) {
+                    return MovementType.CLIMB;
+                }
+                return null;
+            }
+            return MovementType.JUMP;
+        } else if (dy < 0) {
+            if (-dy > Config.MAX_DROP_HEIGHT) return null;
+            return MovementType.FALL;
+        }
+
+        // Then check horizontal movement
+        if (isDiagonalMove(from, to)) {
+            // Extra validation for diagonal moves
+            if (!canMoveDiagonally(from, to)) return null;
+            return MovementType.DIAGONAL;
+        }
+
+        return MovementType.WALK;
+    }
+
+    private static boolean canMoveDiagonally(BlockPos from, BlockPos to) {
+        // Check both cardinal directions that make up the diagonal
+        BlockPos xStep = new BlockPos(to.getX(), from.getY(), from.getZ());
+        BlockPos zStep = new BlockPos(from.getX(), from.getY(), to.getZ());
+
+        // Must have valid positions and head clearance in both directions
+        return isValidPosition(xStep) && isValidPosition(zStep) &&
+               hasHeadroom(xStep) && hasHeadroom(zStep) &&
+                hasObstaclesBetween(from, xStep) && hasObstaclesBetween(from, zStep);
+    }
+
+
+    private int getVerticalClearance(BlockPos pos) {
+        int clearance = 0;
+        for (int y = 1; y <= 3; y++) {
+            if (!isAirOrPassable(pos.up(y))) break;
+            clearance++;
+        }
+        return clearance;
     }
 
     // Path reconstruction
@@ -484,7 +677,7 @@ public class SAStarPathfinder {
     }
 
     private boolean hasDirectPath(BlockPos from, BlockPos to) {
-        return !hasObstacle(from, to, 2);
+        return !PathNode.hasObstacle(from, to, 2);
     }
 
     private double calculatePathLength(List<BlockPos> path) {
@@ -615,7 +808,7 @@ public class SAStarPathfinder {
             double x = pos.getX() + 0.5 - size;
             double y = pos.getY() + 0.5 - size;
             double z = pos.getZ() + 0.5 - size;
-            double s = size * 2;
+            double s = size * 10;
 
             GL11.glBegin(GL11.GL_QUADS);
             GL11.glVertex3d(x, y, z);

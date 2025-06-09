@@ -54,10 +54,16 @@ public class PathfindingAPI {
         SAStarPathfinder.getInstance().clearCache();
     }
 
+
+
     /**
      * Get last pathfinding result
      */
     public static SAStarPathfinder.PathResult getLastResult() {
         return SAStarPathfinder.getInstance().getLastResult();
+    }
+
+    public static void updateMovementCapabilities(double speedMultiplier, int jumpBoostLevel) {
+        SAStarPathfinder.updateMovementCapabilities(speedMultiplier, jumpBoostLevel);
     }
 }

@@ -5,6 +5,7 @@ import com.shadow.ShadowAddons.utils.CommandUtils.Command;
 import com.shadow.ShadowAddons.utils.pathfinding.PathfindingIntegration;
 import com.shadow.ShadowAddons.utils.pathfinding.PathfindingAPI;
 import com.shadow.ShadowAddons.utils.pathfinding.SAStarPathfinder;
+import com.shadow.ShadowAddons.utils.RotationsUtils.RotationHandler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.command.CommandException;
@@ -12,12 +13,13 @@ import net.minecraft.command.ICommandSender;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.ChatComponentText;
 import net.minecraft.util.MathHelper;
+import net.minecraft.util.Vec3;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import net.minecraftforge.common.MinecraftForge;
 
-import java.awt.*;
+import java.awt.Toolkit;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
 import java.util.List;
@@ -28,29 +30,32 @@ public class Pathwalk {
     private static boolean isWalking = false;
 
     // Timeout / tick variables
-    private static long lastUpdateTime    = 0;
+    private static long lastUpdateTime = 0;
     private static final long UPDATE_INTERVAL = 50;   // ~20 ticks/sec
-    private static final long RECALC_INTERVAL  = 5000; // 5 sec
-    private static long lastRecalcTime    = 0;
+    private static final long RECALC_INTERVAL = 5000; // 5 sec
+    private static long lastRecalcTime = 0;
 
     // How long we allow any single A* search (ms)
     private static final long MAX_SEARCH_TIME_MS = 5000;
     private static long pathSearchStartTime = 0;
 
-    // Rotation smoothing
-    private static float  targetYaw    = 0;
-    private static float  targetPitch  = 0;
-    private static boolean isRotating  = false;
-    private static final float ROTATION_SPEED = 30.0f; // deg/tick
-
     // Current A* path
-    private static List<BlockPos> currentPath    = null;
-    private static int            currentPathIndex = 0;
-    private static BlockPos       currentTarget    = null;
-    private static int            currentRadius    = SAStarPathfinder.Config.MAX_SEARCH_RADIUS;
+    private static List<BlockPos> currentPath = null;
+    private static int currentPathIndex = 0;
+    public static BlockPos currentTarget = null;
+    private static int currentRadius = SAStarPathfinder.Config.MAX_SEARCH_RADIUS;
 
     // Waypoints
     private static Map<String, BlockPos> waypoints = new HashMap<>();
+
+    // Movement state tracking
+    private static float targetYaw = 0;
+    private static float targetPitch = 0;
+    private static boolean hasSetInitialRotation = false;
+    private static long lastRotationUpdate = 0;
+    private static final long ROTATION_UPDATE_INTERVAL = 100; // Update rotation every 100ms
+    private static final float ROTATION_SPEED = 15.0f; // Degrees per update
+    private static final float YAW_TOLERANCE = 50.0f; // Degrees - how aligned we need to be to move
 
     public static void loadCommands() {
         ShadowAddons.commandManager.addCommand(new Command("pathwalk") {
@@ -73,7 +78,7 @@ public class Pathwalk {
                 }
 
                 try {
-                    // “here” sub‐command
+                    // "here" sub‐command
                     if (args[0].equalsIgnoreCase("here")) {
                         BlockPos ppos = new BlockPos(player.posX, player.posY, player.posZ);
                         sender.addChatMessage(
@@ -82,7 +87,7 @@ public class Pathwalk {
                         return;
                     }
 
-                    // “waypoint” sub‐command
+                    // "waypoint" sub‐command
                     if (args[0].equalsIgnoreCase("waypoint") && args.length >= 2) {
                         saveWaypoint(args[1], player);
                         sender.addChatMessage(
@@ -90,7 +95,7 @@ public class Pathwalk {
                         return;
                     }
 
-                    // “goto” sub‐command
+                    // "goto" sub‐command
                     if (args[0].equalsIgnoreCase("goto") && args.length >= 2) {
                         initializePathfinderIfNeeded(player.getEntityWorld());
                         BlockPos wp = getWaypoint(args[1]);
@@ -351,7 +356,7 @@ public class Pathwalk {
         // Reset any existing path
         stopPathfinding();
 
-        // Figure out a “smart” radius:
+        // Figure out a "smart" radius:
         BlockPos start = new BlockPos(player.posX, player.posY, player.posZ);
         double dist = Math.sqrt(start.distanceSq(target));
         if (requestedRadius > 0) {
@@ -374,15 +379,18 @@ public class Pathwalk {
         pathSearchStartTime = System.currentTimeMillis();
         ShadowAddons.pathfinder.findPathAsync(start, target, currentRadius);
 
-        isWalking       = true;
+        // Reset movement state
+        hasSetInitialRotation = false;
+        targetYaw = 0;
+        targetPitch = 0;
+        lastRotationUpdate = 0;
+
+        isWalking = true;
         lastUpdateTime = System.currentTimeMillis();
-        lastRecalcTime  = System.currentTimeMillis();
+        lastRecalcTime = System.currentTimeMillis();
     }
 
-    /**
-     * Called every client‐tick (~20Hz) while isWalking == true.
-     * Checks for timeouts, retrieves A* when done, and follows the path.
-     */
+
     private static void updatePathfinding() {
         if (!isWalking || ShadowAddons.pathfinder == null) return;
 
@@ -411,6 +419,7 @@ public class Pathwalk {
             if (path != null && !path.equals(currentPath)) {
                 currentPath = path;
                 currentPathIndex = 0;
+                hasSetInitialRotation = false; // Reset rotation when new path is set
             }
         }
 
@@ -423,14 +432,22 @@ public class Pathwalk {
 
         // 4) If we have a valid path, follow it
         if (currentPath != null && currentPathIndex < currentPath.size()) {
-            BlockPos nextNode  = currentPath.get(currentPathIndex);
+            BlockPos nextNode = currentPath.get(currentPathIndex);
             BlockPos currentPos = new BlockPos(player.posX, player.posY, player.posZ);
 
-            // If within ~1.5 blocks, advance to next node
-            if (currentPos.distanceSq(nextNode) < 2.25) {
+            // Check if we've reached the current node
+            double dx = (nextNode.getX() + 0.5) - player.posX;
+            double dy = nextNode.getY() - player.posY;
+            double dz = (nextNode.getZ() + 0.5) - player.posZ;
+            double distSq = dx * dx + dy * dy + dz * dz;
+
+            // If within completion threshold, advance to next node
+            if (distSq < 0.8 * 0.8) {  // Within 0.8 blocks in 3D space
                 currentPathIndex++;
+                hasSetInitialRotation = false; // Reset rotation for new node
+
                 if (currentPathIndex >= currentPath.size()) {
-                    // Reached the final node
+                    // Reached final destination
                     stopPathfinding();
                     player.addChatMessage(new ChatComponentText(
                             "§a[Pathfinder] Reached destination!"));
@@ -439,10 +456,25 @@ public class Pathwalk {
                 nextNode = currentPath.get(currentPathIndex);
             }
 
+            // Also check if we're close to the final target
+            if (currentTarget != null) {
+                double targetDx = (currentTarget.getX() + 0.5) - player.posX;
+                double targetDy = currentTarget.getY() - player.posY;
+                double targetDz = (currentTarget.getZ() + 0.5) - player.posZ;
+                double targetDistSq = targetDx * targetDx + targetDy * targetDy + targetDz * targetDz;
+
+                if (targetDistSq < 1.2 * 1.2) { // Within 1.2 blocks of final target
+                    stopPathfinding();
+                    player.addChatMessage(new ChatComponentText(
+                            "§a[Pathfinder] Reached destination!"));
+                    return;
+                }
+            }
+
             followCurrentPath(player, nextNode);
         }
 
-        // 5) Periodically ask A* to recalc if we stray off
+        // 5) Periodically recalculate path if needed
         if (now - lastRecalcTime > RECALC_INTERVAL) {
             lastRecalcTime = now;
             BlockPos currentPos = new BlockPos(player.posX, player.posY, player.posZ);
@@ -452,85 +484,148 @@ public class Pathwalk {
         }
     }
 
-    /**
-     * Smoothly rotate the player toward nextNode and press movement/jump as needed.
-     */
-    private static void followCurrentPath(EntityPlayerSP player, BlockPos nextNode) {
-        double dx = (nextNode.getX() + 0.5) - player.posX;
-        double dz = (nextNode.getZ() + 0.5) - player.posZ;
-        double dy = (nextNode.getY() + 0.5) - player.posY;
 
-        float desiredYaw = (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
-        desiredYaw = MathHelper.wrapAngleTo180_float(desiredYaw);
-        double horiz = Math.sqrt(dx * dx + dz * dz);
-        float desiredPitch = (float) (Math.atan2(-dy, horiz) * 180.0 / Math.PI);
+private static void followCurrentPath(EntityPlayerSP player, BlockPos nextNode) {
+    // Calculate direction to target
+    double dx = (nextNode.getX() + 0.5) - player.posX;
+    double dz = (nextNode.getZ() + 0.5) - player.posZ;
+    double horizDist = Math.sqrt(dx * dx + dz * dz);
 
-        if (!isRotating ||
-                Math.abs(MathHelper.wrapAngleTo180_float(desiredYaw - targetYaw)) > 5.0f) {
-            targetYaw    = desiredYaw;
-            targetPitch  = MathHelper.clamp_float(desiredPitch, -90.0f, 90.0f);
-            isRotating   = true;
+    // Improved stuck detection: check for both horizontal collision and lack of progress
+    boolean isStuck = player.isCollidedHorizontally;
+    if (!isStuck) {
+        // Raycast to check for immediate obstructions
+        isStuck = isBlockObstructing(player);
+    }
+
+    if (isStuck) {
+        // Recalculate path if stuck for more than 1 second
+        if (System.currentTimeMillis() - lastProgressTime > 1000) {
+            BlockPos currentPos = new BlockPos(player.posX, player.posY, player.posZ);
+            if (currentTarget != null) {
+                // Request path recalculation
+                ShadowAddons.pathfinder.recalculateIfNeeded(currentPos, currentTarget, currentRadius);
+                lastProgressTime = System.currentTimeMillis(); // Reset timer
+                return; // Skip movement this tick while recalculating
+            }
         }
+    } else {
+        // Update progress time when not stuck
+        lastProgressTime = System.currentTimeMillis();
+    }
 
-        if (isRotating) {
-            float curYaw    = player.rotationYaw;
-            float curPitch  = player.rotationPitch;
-            float yawDiff   = MathHelper.wrapAngleTo180_float(targetYaw - curYaw);
-            float pitchDiff = targetPitch - curPitch;
-            float step      = ROTATION_SPEED;
+    // Calculate required yaw for target direction
+    double targetYaw = Math.toDegrees(Math.atan2(dz, dx)) - 90.0;
 
-            if (Math.abs(yawDiff) > step)   yawDiff   = Math.signum(yawDiff) * step;
-            if (Math.abs(pitchDiff) > step) pitchDiff = Math.signum(pitchDiff) * step;
+    // Get current yaw in range -180 to 180
+    float currentYaw = MathHelper.wrapAngleTo180_float(player.rotationYaw);
 
-            player.rotationYaw   = curYaw   + yawDiff;
-            player.rotationPitch = curPitch + pitchDiff;
+    // Get target yaw in same range
+    targetYaw = MathHelper.wrapAngleTo180_double(targetYaw);
 
-            if (Math.abs(yawDiff) < 1.0f && Math.abs(pitchDiff) < 1.0f) {
-                isRotating = false;
+    // Calculate shortest rotation path
+    float yawDiff = (float) MathHelper.wrapAngleTo180_double(targetYaw - currentYaw);
+
+    // Smooth rotation with variable speed based on angle difference
+    float baseSpeed = 2.0f;
+    float maxSpeed = 8.0f;
+    float rotationSpeed = Math.min(Math.max(Math.abs(yawDiff) * 0.3f, baseSpeed), maxSpeed);
+
+    // Apply rotation if difference is noticeable
+    if (Math.abs(yawDiff) > 1.0f) {
+        // Use sign of yawDiff to determine direction and apply smooth rotation
+        float rotation = Math.min(rotationSpeed, Math.abs(yawDiff)) * Math.signum(yawDiff);
+        player.rotationYaw += rotation;
+    }
+
+    // Keep pitch level
+    player.rotationPitch = 0;
+
+    // Release all movement keys first
+    releaseMovementKeys();
+
+    // Only move if we're roughly facing the right direction (within 25 degrees)
+    if (Math.abs(yawDiff) < 25.0f) {
+        if (horizDist > 0.1) {
+            Minecraft mc = Minecraft.getMinecraft();
+
+            // Always move forward when there's distance
+            net.minecraft.client.settings.KeyBinding.setKeyBindState(
+                    mc.gameSettings.keyBindForward.getKeyCode(), true);
+
+            // Sprint behavior - humans sprint when they have clear distance
+            if (horizDist > 3.0) {
+                net.minecraft.client.settings.KeyBinding.setKeyBindState(
+                        mc.gameSettings.keyBindSprint.getKeyCode(), true);
+            }
+
+            // Smarter strafing - help correct course when slightly off angle
+            if (Math.abs(yawDiff) > 5.0f && horizDist > 1.0) {
+                if (yawDiff > 0) {
+                    net.minecraft.client.settings.KeyBinding.setKeyBindState(
+                            mc.gameSettings.keyBindRight.getKeyCode(), true);
+                } else {
+                    net.minecraft.client.settings.KeyBinding.setKeyBindState(
+                            mc.gameSettings.keyBindLeft.getKeyCode(), true);
+                }
             }
         }
 
-        // Press movement keys
-        Minecraft mc = Minecraft.getMinecraft();
-        net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                mc.gameSettings.keyBindForward.getKeyCode(), false);
-        net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                mc.gameSettings.keyBindBack.getKeyCode(), false);
-        net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                mc.gameSettings.keyBindLeft.getKeyCode(), false);
-        net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                mc.gameSettings.keyBindRight.getKeyCode(), false);
-        net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                mc.gameSettings.keyBindJump.getKeyCode(), false);
-
-        double horizDist = Math.sqrt(dx * dx + dz * dz);
-        if (horizDist > 0.1) {
-            net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                    mc.gameSettings.keyBindForward.getKeyCode(), true);
-            net.minecraft.client.settings.KeyBinding.setKeyBindState(
-                    mc.gameSettings.keyBindSprint.getKeyCode(), true);
-        }
-        if (dy > 0.5 && player.onGround) {
+        // Intelligent jumping - only when necessary
+        double dy = nextNode.getY() - player.posY;
+        if (player.onGround && dy > 0.5) {
+            Minecraft mc = Minecraft.getMinecraft();
             net.minecraft.client.settings.KeyBinding.setKeyBindState(
                     mc.gameSettings.keyBindJump.getKeyCode(), true);
         }
-    }
 
-    /**
-     * Cancels any current path and releases movement keys.
-     */
+        // Predictive jumping for blocks ahead
+        if (currentPath != null && currentPathIndex + 1 < currentPath.size()) {
+            BlockPos nextNextNode = currentPath.get(currentPathIndex + 1);
+            double nextDy = nextNextNode.getY() - nextNode.getY();
+            if (player.onGround && nextDy > 0.5 && horizDist < 2.0) {
+                Minecraft mc = Minecraft.getMinecraft();
+                net.minecraft.client.settings.KeyBinding.setKeyBindState(
+                        mc.gameSettings.keyBindJump.getKeyCode(), true);
+            }
+        }
+    }
+}
+private static long lastProgressTime = System.currentTimeMillis();
+
+
+//create isBlockObstructing method to check for obstructions
+private static boolean isBlockObstructing(EntityPlayerSP player) {
+    World world = player.getEntityWorld();
+    Vec3 playerPos = new Vec3(player.posX, player.posY + player.getEyeHeight(), player.posZ);
+    Vec3 lookVec = player.getLookVec().normalize().addVector(1.5, 1.5, 1.5);
+    Vec3 targetPos = playerPos.add(lookVec);
+
+    // Check if there's a solid block in the way
+    BlockPos targetBlockPos = new BlockPos(targetPos.xCoord, targetPos.yCoord, targetPos.zCoord);
+    return world.getBlockState(targetBlockPos).getBlock().isFullBlock();
+}
+
+
     private static void stopPathfinding() {
-        isWalking       = false;
-        currentPath     = null;
-        currentPathIndex= 0;
-        currentTarget   = null;
-        isRotating      = false;
+        isWalking = false;
+        currentPath = null;
+        currentPathIndex = 0;
+        currentTarget = null;
+        hasSetInitialRotation = false;
+        targetYaw = 0;
+        targetPitch = 0;
+
+        // Stop external rotation handler if it exists
+        RotationHandler.forceStop();
 
         if (ShadowAddons.pathfinder != null) {
             ShadowAddons.pathfinder.cancelPath();
         }
         releaseMovementKeys();
     }
+
+
 
     private static void releaseMovementKeys() {
         try {
