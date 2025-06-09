@@ -1,6 +1,7 @@
 package com.shadow.ShadowAddons.Modules.General;
 
 import com.shadow.ShadowAddons.utils.ModulesUtils.Module;
+import com.shadow.ShadowAddons.utils.ModulesUtils.ModuleManager;
 import net.minecraft.util.EnumChatFormatting;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -22,4 +23,11 @@ public class ping extends Module {
     public void onDisable() {
 
     }
+
+    @Override
+    public ModuleManager.Category getCategory() {
+        return ModuleManager.Category.MISC;
+    }
+
+
 }
