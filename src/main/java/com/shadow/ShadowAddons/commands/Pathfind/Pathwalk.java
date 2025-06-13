@@ -1,4 +1,4 @@
-package com.shadow.ShadowAddons.commands.Movement;
+package com.shadow.ShadowAddons.commands.Pathfind;
 
 import com.shadow.ShadowAddons.ShadowAddons;
 import com.shadow.ShadowAddons.utils.CommandUtils.Command;

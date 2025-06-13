@@ -1,11 +1,12 @@
 package com.shadow.ShadowAddons.utils.pathfinding;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockLadder;
-import net.minecraft.block.BlockStairs;
+import net.minecraft.block.*;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.init.Blocks;
+import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.util.BlockPos;
 import net.minecraft.world.World;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
@@ -101,21 +102,24 @@ public class SAStarPathfinder {
 
             // First check if the position itself is a valid block to be on
             boolean validGround = blockBelow.isNormalCube() ||
-                                blockBelow instanceof net.minecraft.block.BlockStairs ||
-                                blockBelow instanceof net.minecraft.block.BlockSlab ||
-                                blockBelow instanceof net.minecraft.block.BlockFence ||
-                                blockBelow instanceof net.minecraft.block.BlockWall ||
-                                blockAt instanceof net.minecraft.block.BlockLadder ||
-                                blockAt instanceof net.minecraft.block.BlockVine ||
-                                (Config.ALLOW_SWIMMING && blockAt.getMaterial().isLiquid());
+                    blockBelow instanceof net.minecraft.block.BlockStairs ||
+                    blockBelow instanceof net.minecraft.block.BlockSlab ||
+                    blockBelow instanceof net.minecraft.block.BlockFence ||
+                    blockBelow instanceof net.minecraft.block.BlockWall ||
+                    blockAt instanceof net.minecraft.block.BlockLadder ||
+                    blockAt instanceof net.minecraft.block.BlockVine ||
+                    blockAt instanceof net.minecraft.block.BlockFenceGate ||
+                    blockAt instanceof net.minecraft.block.BlockIce ||
+                    blockAt instanceof net.minecraft.block.BlockSnow ||
+                    (Config.ALLOW_SWIMMING && blockAt.getMaterial().isLiquid());
 
             // Also check the block itself and one above for passability
             boolean hasHeadroom = (blockAt.isPassable(world, pos) ||
-                                 blockAt.getMaterial().isLiquid() ||
-                                 blockAt instanceof net.minecraft.block.BlockLadder ||
-                                 blockAt instanceof net.minecraft.block.BlockVine) &&
-                                (blockAbove.isPassable(world, pos.up()) ||
-                                 blockAbove.getMaterial().isLiquid());
+                    blockAt.getMaterial().isLiquid() ||
+                    blockAt instanceof net.minecraft.block.BlockLadder ||
+                    blockAt instanceof net.minecraft.block.BlockVine) &&
+                    (blockAbove.isPassable(world, pos.up()) ||
+                            blockAbove.getMaterial().isLiquid());
 
             // Special case: if we're checking goal position, be more lenient
             boolean isOnOrNearGround = validGround;
@@ -127,8 +131,8 @@ public class SAStarPathfinder {
                         BlockPos checkPos = pos.add(dx, -1, dz);
                         Block checkBlock = world.getBlockState(checkPos).getBlock();
                         if (checkBlock.isNormalCube() ||
-                            checkBlock instanceof net.minecraft.block.BlockStairs ||
-                            checkBlock instanceof net.minecraft.block.BlockSlab) {
+                                checkBlock instanceof net.minecraft.block.BlockStairs ||
+                                checkBlock instanceof net.minecraft.block.BlockSlab) {
                             isOnOrNearGround = true;
                             break;
                         }
@@ -139,11 +143,11 @@ public class SAStarPathfinder {
             // Debug output for invalid positions
             if (Config.DEBUG_ENABLED && (!isOnOrNearGround || !hasHeadroom)) {
                 System.out.println("Invalid position at " + pos +
-                    ": ground=" + isOnOrNearGround +
-                    ", headroom=" + hasHeadroom +
-                    ", block=" + blockAt.getLocalizedName() +
-                    ", below=" + blockBelow.getLocalizedName() +
-                    ", above=" + blockAbove.getLocalizedName());
+                        ": ground=" + isOnOrNearGround +
+                        ", headroom=" + hasHeadroom +
+                        ", block=" + blockAt.getLocalizedName() +
+                        ", below=" + blockBelow.getLocalizedName() +
+                        ", above=" + blockAbove.getLocalizedName());
             }
 
             return isOnOrNearGround && hasHeadroom;
@@ -224,21 +228,38 @@ public class SAStarPathfinder {
             return true;
         }
         // create tryNeighbor method to attempt adding a neighbor node
-        private void tryNeighbor(List<PathNode> neighbors, PathNode current, BlockPos neighborPos, BlockPos goal) {
+        /**
+         * Attempts to add a neighbor node using the given movement type.
+         *
+         * @param neighbors   the list to add to
+         * @param current     the current node
+         * @param neighborPos the position of the potential neighbor
+         * @param goal        the goal position (for heuristic)
+         * @param movementType the type of movement used to get here
+         */
+        private void tryNeighbor(
+                List<PathNode> neighbors,
+                PathNode current,
+                BlockPos neighborPos,
+                BlockPos goal,
+                MovementType movementType
+        ) {
+            // 1) Valid position?
             if (!isValidPosition(neighborPos)) return;
 
-            // Check if we can move to this position
+            // 2) Headroom check
             if (!hasHeadroom(neighborPos)) return;
 
-            // Calculate movement type
-            MovementType movementType = getMovementType(current.pos, neighborPos);
-            if (movementType == null) return; // Invalid movement
+            // 3) Movement type must be allowed
+            if (movementType == null) return;
 
-            // Calculate costs
-            double gCost = current.gCost + movementType.cost * Math.sqrt(current.pos.distanceSq(neighborPos));
+            // 4) Compute costs
+            double stepDistance = Math.sqrt(current.pos.distanceSq(neighborPos));
+            double gCost = current.gCost + movementType.cost * stepDistance;
             double hCost = calculateHeuristic(neighborPos, goal);
-            PathNode neighborNode = new PathNode(neighborPos, current, gCost, hCost, movementType);
 
+            // 5) Construct and add the new node
+            PathNode neighborNode = new PathNode(neighborPos, current, gCost, hCost, movementType);
             neighbors.add(neighborNode);
         }
 
@@ -251,26 +272,170 @@ public class SAStarPathfinder {
                 if (!block.isAir(world, checkPos) && !block.isPassable(world, checkPos)) return false;
             }
             return true;
-}
+        }
 
         public static boolean hasObstacle(BlockPos from, BlockPos to, int maxHeight) {
             World world = Minecraft.getMinecraft().theWorld;
+
+            // Null checks
+            if (world == null || from == null || to == null) {
+                return true;
+            }
+
+            // Check if chunks are loaded
+            if (!world.isBlockLoaded(from) || !world.isBlockLoaded(to)) {
+                return true;
+            }
+
             int dx = to.getX() - from.getX();
             int dz = to.getZ() - from.getZ();
+            int dy = to.getY() - from.getY();
             int steps = Math.max(Math.abs(dx), Math.abs(dz));
+
+            // Prevent division by zero
+            if (steps == 0) {
+                return false;
+            }
+
             double stepX = dx / (double) steps;
             double stepZ = dz / (double) steps;
+            double stepY = dy / (double) steps;
 
             for (int i = 0; i <= steps; i++) {
-                BlockPos checkPos = from.add((int) (stepX * i), 0, (int) (stepZ * i));
-                for (int y = 0; y < maxHeight; y++) {
-                    Block block = world.getBlockState(checkPos.up(y)).getBlock();
-                    if (!block.isAir(world, checkPos.up(y)) && !block.isPassable(world, checkPos)) {
+                BlockPos checkPos = from.add((int) (stepX * i), (int) (stepY * i), (int) (stepZ * i));
+
+                // Check if chunk is loaded for this position
+                if (!world.isBlockLoaded(checkPos)) {
+                    return true;
+                }
+
+                // Check vertical clearance (player height = 2 blocks)
+                for (int y = 0; y < Math.max(2, maxHeight); y++) {
+                    BlockPos currentPos = checkPos.up(y);
+
+                    // Bounds check
+                    if (currentPos.getY() < 0 || currentPos.getY() > 255) {
                         return true;
+                    }
+
+                    IBlockState blockState = world.getBlockState(currentPos);
+                    Block block = blockState.getBlock();
+
+                    // Basic solid block check
+                    if (!block.isAir(world, currentPos) && !block.isPassable(world, currentPos)) {
+                        // Check if block has custom collision bounds
+                        AxisAlignedBB blockBounds = block.getCollisionBoundingBox(world, currentPos, blockState);
+                        if (blockBounds != null) {
+                            return true;
+                        }
+                    }
+
+                    // Liquid checks
+                    if (block instanceof BlockLiquid){
+                        return true; // Treat all liquids as obstacles
+                    }
+
+                    // Specific block type checks
+                    if (block instanceof BlockFire ||
+                            block instanceof BlockStaticLiquid) {
+                        return true;
+                    }
+
+                    // Web/cobweb check (slows movement significantly)
+                    if (block == Blocks.web) {
+                        return true;
+                    }
+
+                    // Partial blocks that might block movement
+                    if (block instanceof BlockSlab &&
+                            blockState.getValue(BlockSlab.HALF) == BlockSlab.EnumBlockHalf.TOP && y == 0) {
+                        return true; // Top slabs at foot level
+                    }
+
+                    // Stairs are passable - don't block them
+
+                    // Fence and wall checks
+                    if (block instanceof BlockFence ||
+                            block instanceof BlockWall ||
+                            block instanceof BlockFenceGate) {
+                        return true;
+                    }
+
+                    // Door checks (closed doors are obstacles)
+                    if (block instanceof BlockDoor) {
+                        if (!blockState.getValue(BlockDoor.OPEN)) {
+                            return true;
+                        }
+                    }
+
+                    // Trapdoor checks
+                    if (block instanceof BlockTrapDoor) {
+                        if (!blockState.getValue(BlockTrapDoor.OPEN)) {
+                            return true;
+                        }
+                    }
+
+                    // Pressure plate and redstone component checks
+                    if (block instanceof BlockPressurePlate ||
+                            block instanceof BlockRedstoneWire ||
+                            block instanceof BlockTripWire) {
+                        // These might not block movement but could trigger unwanted effects
+                        return true;
+                    }
+                }
+
+                // Diagonal movement checks (improved)
+                if (Math.abs(dx) > 0 && Math.abs(dz) > 0) {
+                    // Check both adjacent blocks for diagonal movement
+                    BlockPos diagCheckX = checkPos.add(Integer.signum(dx), 0, 0);
+                    BlockPos diagCheckZ = checkPos.add(0, 0, Integer.signum(dz));
+
+                    if (world.isBlockLoaded(diagCheckX) && world.isBlockLoaded(diagCheckZ)) {
+                        for (int y = 0; y < Math.max(2, maxHeight); y++) {
+                            BlockPos diagPosX = diagCheckX.up(y);
+                            BlockPos diagPosZ = diagCheckZ.up(y);
+
+                            IBlockState diagStateX = world.getBlockState(diagPosX);
+                            IBlockState diagStateZ = world.getBlockState(diagPosZ);
+                            Block diagBlockX = diagStateX.getBlock();
+                            Block diagBlockZ = diagStateZ.getBlock();
+
+                            // Check if diagonal movement is blocked by adjacent solid blocks
+                            if ((!diagBlockX.isAir(world, diagPosX) && !diagBlockX.isPassable(world, diagPosX)) ||
+                                    (!diagBlockZ.isAir(world, diagPosZ) && !diagBlockZ.isPassable(world, diagPosZ))) {
+
+                                // Additional checks for collision bounds
+                                AxisAlignedBB boundsX = diagBlockX.getCollisionBoundingBox(world, diagPosX, diagStateX);
+                                AxisAlignedBB boundsZ = diagBlockZ.getCollisionBoundingBox(world, diagPosZ, diagStateZ);
+
+                                if (boundsX != null || boundsZ != null) {
+                                    return true;
+                                }
+                            }
+                        }
                     }
                 }
             }
             return false;
+        }
+
+        //make an addtional check for obstacles in the direction of movement becuase it can break if theres only 1 block and we just stand still without jumping over it
+        public static boolean canMoveDiagonally(BlockPos from, BlockPos to) {
+            World world = Minecraft.getMinecraft().theWorld;
+            if (world == null) return false;
+
+            // Check if the diagonal move is valid
+            if (!isValidPosition(to)) return false;
+
+            // Check for obstacles in the diagonal direction
+            int dx = to.getX() - from.getX();
+            int dz = to.getZ() - from.getZ();
+            if (Math.abs(dx) != Math.abs(dz)) return false; // Must be a true diagonal
+
+            // Check both blocks in the diagonal path
+            BlockPos checkPos1 = from.add(dx, 0, 0);
+            BlockPos checkPos2 = from.add(0, 0, dz);
+            return isValidPosition(checkPos1) && isValidPosition(checkPos2);
         }
 
         public static boolean isDiagonalMove(BlockPos from, BlockPos to) {
@@ -379,6 +544,19 @@ public class SAStarPathfinder {
             return new PathResult(Arrays.asList(start), true, 0, 1, 0, null);
         }
 
+        //check if theres a wall if there is a wall we try to find a gap if none is found we return a longer path that goes around the wall
+        if (hasObstacle(start, goal, Config.MAX_JUMP_HEIGHT)) {
+            List<BlockPos> gaps = findWallGap(start, goal);
+            if (!gaps.isEmpty()) {
+                // If we found a gap, use it as the new start
+                start = gaps.get(0);
+            } else {
+                // No gaps found, return a longer path that goes around the wall
+                return new PathResult(new ArrayList<>(), false, 0, 0, 0, "No gap found in wall");
+            }
+        }
+
+
         // Initialize A* algorithm
         PriorityQueue<PathNode> openSet = new PriorityQueue<>();
         Set<BlockPos> closedSet = new HashSet<>();
@@ -433,51 +611,85 @@ public class SAStarPathfinder {
     // Get valid neighbors for current node
     private List<PathNode> getNeighbors(PathNode current, BlockPos goal) {
         List<PathNode> neighbors = new ArrayList<>();
-        BlockPos pos = current.pos;
+        BlockPos       pos       = current.pos;
 
-        // Try cardinal directions first with potential straight path bonus
         int[][] cardinalDirs = {{0,1}, {1,0}, {0,-1}, {-1,0}};
         for (int[] dir : cardinalDirs) {
-            BlockPos nextPos = pos.add(dir[0], 0, dir[1]);
+            BlockPos flatPos = pos.add(dir[0], 0, dir[1]);
+            IBlockState  state    = world.getBlockState(flatPos);
+            Block        block    = state.getBlock();
+
+            // ─── 1) STAIRS ───────────────────────────────────
+            if (block instanceof BlockStairs) {
+                BlockPos stepUp = flatPos.up();
+                if (isValidPosition(stepUp) && hasHeadroom(stepUp)) {
+                    current.tryNeighbor(neighbors, current, stepUp, goal, MovementType.CLIMB);
+                }
+                continue;  // *** skip any jump‐over here! ***
+            }
+
+            // ─── 2) TOP‐HALF SLABS ────────────────────────────
+            if (block instanceof BlockSlab && !((BlockSlab)block).isDouble()) {
+                BlockSlab.EnumBlockHalf half = state.getValue(BlockSlab.HALF);
+                if (half == BlockSlab.EnumBlockHalf.TOP) {
+                    BlockPos slabTop = flatPos.up();
+                    if (isValidPosition(slabTop) && hasHeadroom(slabTop)) {
+                        current.tryNeighbor(neighbors, current, slabTop, goal, MovementType.WALK);
+                    }
+                    continue;
+                }
+            }
+
+            // ─── 3) STRAIGHT‐PATH BONUS ──────────────────────
             if (current.parent != null) {
-                // Check if this continues in the same direction as current movement
                 int prevDx = pos.getX() - current.parent.pos.getX();
                 int prevDz = pos.getZ() - current.parent.pos.getZ();
                 if (prevDx == dir[0] && prevDz == dir[1] && Config.PREFER_STRAIGHT_PATHS) {
-                    // This is a straight continuation - apply bonus
                     PathNode straightNode = new PathNode(
-                        nextPos,
-                        current,
-                        current.gCost + MovementType.WALK.cost * Config.STRAIGHT_PATH_BONUS,
-                        calculateHeuristic(nextPos, goal),
-                        MovementType.WALK
+                            flatPos,
+                            current,
+                            current.gCost + MovementType.WALK.cost * Config.STRAIGHT_PATH_BONUS,
+                            calculateHeuristic(flatPos, goal),
+                            MovementType.WALK
                     );
-                    if (isValidPosition(nextPos) && hasHeadroom(nextPos)) {
+                    if (isValidPosition(flatPos) && hasHeadroom(flatPos)) {
                         neighbors.add(straightNode);
                         continue;
                     }
                 }
             }
-            current.tryNeighbor(neighbors, current, nextPos, goal);
+
+            // ─── 4) FLAT WALK ───────────────────────────────
+            current.tryNeighbor(neighbors, current, flatPos, goal, MovementType.WALK);
+
+            // ─── 5) JUMP OVER SINGLE‐BLOCK OBSTACLE ──────────
+            // Only if the obstacle isn’t a stair (so you can’t jump the whole staircase in one go)
+            BlockPos ahead    = flatPos;
+            BlockPos above    = ahead.up();
+            IBlockState obsSt = world.getBlockState(ahead);
+            if (!(obsSt.getBlock() instanceof BlockStairs)
+                    && !isValidPosition(ahead)
+                    && isValidPosition(above)
+                    && hasHeadroom(above)) {
+                current.tryNeighbor(neighbors, current, above, goal, MovementType.JUMP);
+            }
         }
 
-        // Only try diagonals if we don't have good cardinal options
-        if (neighbors.isEmpty() || neighbors.size() < 2) {
-            int[][] diagonalDirs = {{1,1}, {1,-1}, {-1,1}, {-1,-1}};
+        // ─── 6) DIAGONALS ────────────────────────────────
+        if (neighbors.size() < 2) {
+            int[][] diagonalDirs = {{1,1},{1,-1},{-1,1},{-1,-1}};
             for (int[] dir : diagonalDirs) {
                 BlockPos diagPos = pos.add(dir[0], 0, dir[1]);
                 if (canMoveDiagonally(pos, diagPos)) {
-                    current.tryNeighbor(neighbors, current, diagPos, goal);
+                    current.tryNeighbor(neighbors, current, diagPos, goal, MovementType.DIAGONAL);
                 }
             }
         }
 
-        // Add vertical movement options
-        if (current.movementType != MovementType.JUMP) {
-            current.tryNeighbor(neighbors, current, pos.up(), goal);
-        }
-        if (current.movementType != MovementType.FALL) {
-            current.tryNeighbor(neighbors, current, pos.down(), goal);
+        // ─── 7) DROP DOWN ────────────────────────────────
+        BlockPos down = pos.down();
+        if (isValidPosition(down)) {
+            current.tryNeighbor(neighbors, current, down, goal, MovementType.FALL);
         }
 
         return neighbors;
@@ -623,6 +835,8 @@ public class SAStarPathfinder {
         return MovementType.WALK;
     }
 
+
+
     private static boolean canMoveDiagonally(BlockPos from, BlockPos to) {
         // Check both cardinal directions that make up the diagonal
         BlockPos xStep = new BlockPos(to.getX(), from.getY(), from.getZ());
@@ -630,19 +844,10 @@ public class SAStarPathfinder {
 
         // Must have valid positions and head clearance in both directions
         return isValidPosition(xStep) && isValidPosition(zStep) &&
-               hasHeadroom(xStep) && hasHeadroom(zStep) &&
+                hasHeadroom(xStep) && hasHeadroom(zStep) &&
                 hasObstaclesBetween(from, xStep) && hasObstaclesBetween(from, zStep);
     }
 
-
-    private int getVerticalClearance(BlockPos pos) {
-        int clearance = 0;
-        for (int y = 1; y <= 3; y++) {
-            if (!isAirOrPassable(pos.up(y))) break;
-            clearance++;
-        }
-        return clearance;
-    }
 
     // Path reconstruction
     private List<BlockPos> reconstructPath(PathNode goalNode) {
@@ -783,12 +988,41 @@ public class SAStarPathfinder {
 
         private void renderPath() {
             GL11.glLineWidth(3.0f);
-            GL11.glColor3f(0.0f, 1.0f, 0.0f); // Green for path
-            GL11.glBegin(GL11.GL_LINE_STRIP);
+            GL11.glColor3f(1.0f, 0.5f, 0.0f); // Orange for path
+
             for (BlockPos pos : currentPath) {
-                GL11.glVertex3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+                // Draw block outline
+                GL11.glBegin(GL11.GL_LINE_LOOP);
+                // Bottom face
+                GL11.glVertex3d(pos.getX(), pos.getY(), pos.getZ());
+                GL11.glVertex3d(pos.getX() + 1, pos.getY(), pos.getZ());
+                GL11.glVertex3d(pos.getX() + 1, pos.getY(), pos.getZ() + 1);
+                GL11.glVertex3d(pos.getX(), pos.getY(), pos.getZ() + 1);
+                GL11.glEnd();
+
+                // Top face
+                GL11.glBegin(GL11.GL_LINE_LOOP);
+                GL11.glVertex3d(pos.getX(), pos.getY() + 1, pos.getZ());
+                GL11.glVertex3d(pos.getX() + 1, pos.getY() + 1, pos.getZ());
+                GL11.glVertex3d(pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
+                GL11.glVertex3d(pos.getX(), pos.getY() + 1, pos.getZ() + 1);
+                GL11.glEnd();
+
+                // Vertical edges
+                GL11.glBegin(GL11.GL_LINES);
+                GL11.glVertex3d(pos.getX(), pos.getY(), pos.getZ());
+                GL11.glVertex3d(pos.getX(), pos.getY() + 1, pos.getZ());
+
+                GL11.glVertex3d(pos.getX() + 1, pos.getY(), pos.getZ());
+                GL11.glVertex3d(pos.getX() + 1, pos.getY() + 1, pos.getZ());
+
+                GL11.glVertex3d(pos.getX() + 1, pos.getY(), pos.getZ() + 1);
+                GL11.glVertex3d(pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
+
+                GL11.glVertex3d(pos.getX(), pos.getY(), pos.getZ() + 1);
+                GL11.glVertex3d(pos.getX(), pos.getY() + 1, pos.getZ() + 1);
+                GL11.glEnd();
             }
-            GL11.glEnd();
         }
 
         private void renderNodes() {
